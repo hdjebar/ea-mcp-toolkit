@@ -65,29 +65,8 @@ You: "Validate all ArchiMate relationships in the model"
 You: "Create a Business Process called 'Order Fulfillment' in EA"
 ```
 
-## Two MCP Servers
+## Claude Skills
 
-| Server | Runs on | Needs VM? | Read | Write | Best for |
-|--------|---------|-----------|------|-------|----------|
-| **EA Model Analyzer** | macOS (native) | No | ✅ | ❌ | Offline analysis, validation, statistics, impact tracing |
-| **Sparx EA Bridge** | macOS → SSH → VM | Yes | ✅ | ✅ | Live CRUD, diagram export, element creation |
+This toolkit is designed to work alongside **Claude custom skills** — domain-specific instructions that extend Claude's behaviour when interacting with EA models via MCP.
 
-The SQLite analyzer handles the common case (read-only queries, validation, reporting) with zero startup time. The SSH bridge provides full EA interaction through the official Sparx Japan MCP server when you need write operations.
-
-## Requirements
-
-- macOS 13+ (Apple Silicon or Intel)
-- Python 3.10+
-- [uv](https://github.com/astral-sh/uv) (recommended) or pip
-- VMware Fusion 13.5+ (free for personal use) — only for write access
-- Sparx EA license — only for write access
-
-## Documentation
-
-- **[ADR-0001: Hybrid MCP Integration](docs/ADR-0001-hybrid-mcp-integration-sparx-ea-macos.md)** — Full architecture decision record with rationale, trade-offs, and component inventory
-- **[VM Setup Guide](vm-setup/README.md)** — Scripted Windows 11 + EA installation
-- **[MCP Servers Guide](mcp-servers/README.md)** — Server configuration and usage
-
-## License
-
-MIT
+- **Enterprise Architecture skill** — covers ArchiMate 3.2, BPMN 2.0, TOGAF, UML, C4, and 50+ EA frameworks. When combined with this
