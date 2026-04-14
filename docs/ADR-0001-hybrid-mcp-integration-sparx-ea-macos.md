@@ -1,7 +1,7 @@
 # ADR-0001: Adopt Hybrid MCP Integration for Sparx EA on macOS — SSH Bridge plus Native SQLite Analyzer
 
 ## Status
-Proposed
+Accepted (2025-04-14)
 
 ## TOGAF Context
 - **ADM Phase**: D — Technology Architecture
@@ -32,11 +32,11 @@ Proposed
 
 The enterprise architecture practice uses Sparx Enterprise Architect as its primary modeling tool, but the team works on macOS (Apple Silicon). EA is a Windows-only application with a COM-based automation API. Sparx Japan provides an official MCP server (MCP3.exe) that enables Claude to interact with EA models via the Model Context Protocol, but this server requires a running EA instance on Windows and communicates exclusively via Windows STDIO.
 
-The architectural problem is: **how do we connect Claude Desktop and Claude Code running natively on macOS to Sparx EA's MCP capabilities when the MCP server can only run on Windows?**
+The architectural problem is: **how do we connect Claude Desktop and Claude Code running natively on macOS to Sparx EA’s MCP capabilities when the MCP server can only run on Windows?**
 
 Constraints include: Apple Silicon Macs cannot run Windows natively (no Boot Camp); the Sparx MCP server requires COM interop with a live EA process; .qea model files are SQLite databases that can be read cross-platform; the MCP protocol uses JSON-RPC over STDIO (local process piping) or Streamable HTTP (remote); and model write operations must go through the EA COM API to avoid database corruption.
 
-**Triggers**: Need to use Claude AI assistants for ArchiMate modeling, impact analysis, model validation, and documentation generation while working on macOS hardware. The Sparx Japan MCP server (v2.4.1) exists but is Windows-only.
+**Triggers**: Need to use Claude AI assistants for ArchiMate modeling, impact analysis, model validation, and documentation generation while working on macOS hardware.
 
 ## Decision Drivers
 
@@ -71,23 +71,23 @@ Constraints include: Apple Silicon Macs cannot run Windows natively (no Boot Cam
 - .qea files on shared folders are accessible to both paths simultaneously
 
 **Negative (accepted trade-offs):**
-- Two MCP servers to maintain instead of one (mitigation: SQLite server is ~400 lines of self-contained Python; bridge is ~100 lines)
-- SSH key management between Mac and VM required (mitigation: install script automates key generation and offers ssh-copy-id)
-- OpenSSH Server must be enabled in Windows VM (mitigation: one-time setup, automated in post-install script)
-- Write operations require VM running + EA open with model loaded (this is inherent to the COM API, not specific to this option)
+- Two MCP servers to maintain instead of one
+- SSH key management between Mac and VM required (mitigated: install script automates key generation)
+- OpenSSH Server must be enabled in Windows VM (mitigated: one-time setup, automated in post-install script)
+- Write operations require VM running + EA open with model loaded (inherent to the COM API)
 
 **Risks (residual):**
-- SSH connection drops during a write operation could leave EA in an inconsistent state — mitigated by MCP3.exe having no delete operations and EA's own transaction handling
-- SQLite server could report stale data if the model is being actively edited in EA — mitigated by SQLite WAL mode allowing concurrent reads during writes, and by users understanding the read-only nature
+- SSH connection drops during a write operation could leave EA in an inconsistent state — mitigated by MCP3.exe having no delete operations and EA’s own transaction handling
+- SQLite server could report stale data if the model is being actively edited in EA — mitigated by SQLite WAL mode allowing concurrent reads during writes
 - VMware Fusion networking changes (NAT IP reassignment) could break the bridge — mitigated by auto-detection via vmrun in the bridge startup
 
 ### Confirmation
 
 This decision is confirmed when:
-1. `claude mcp list` on macOS shows both "EA Model Analyzer" and "Sparx EA (VM)" servers
+1. `claude mcp list` on macOS shows both “EA Model Analyzer” and “Sparx EA (VM)” servers
 2. Claude can execute `model_statistics` on a .qea file without the VM running
 3. Claude can execute `get_current_diagram` through the bridge with the VM running and EA open
-4. Round-trip latency for a bridge tool call is under 5 seconds (SSH handshake + MCP call)
+4. Round-trip latency for a bridge tool call is under 5 seconds
 5. The install script completes without errors on a clean macOS Sequoia + Apple Silicon machine
 
 ## Pros and Cons of the Options
@@ -108,31 +108,22 @@ This decision is confirmed when:
 
 - ✅ Simplest setup — everything runs locally in Windows
 - ✅ Zero bridging or networking complexity
-- ✅ Officially supported by Sparx Japan
 - ❌ Forces architect to work inside the VM for all Claude interactions
 - ❌ VM must be running for any AI-assisted architecture work
-- ❌ Cannot use Claude Code from macOS terminal
-- ❌ Clipboard, file sharing, and UX friction between macOS and VM
-- ❌ No offline analysis capability when VM is off
+- ❌ No offline analysis capability
 
 ### Option C — Remote HTTP/SSE MCP Server on VM
 
 - ✅ Single server, platform-independent client access
-- ✅ Remote MCP is natively supported by Claude Pro/Max/Team/Enterprise plans
-- ❌ Requires building a custom HTTP wrapper around MCP3.exe (which only speaks STDIO)
-- ❌ Authentication, CORS, and TLS configuration complexity
-- ❌ Remote MCP support is beta and SSE may be deprecated
+- ❌ Requires building a custom HTTP wrapper around MCP3.exe (STDIO-only binary)
+- ❌ Auth, CORS, TLS configuration complexity
 - ❌ No offline analysis when VM is down
-- ❌ Network security surface area larger than SSH tunnel
 
 ### Option D — Status Quo (No MCP)
 
-- ✅ No setup required
-- ✅ No maintenance burden
+- ✅ No setup or maintenance burden
 - ❌ No AI-assisted modeling, validation, or impact analysis
 - ❌ Manual XMI/CSV export-import for every Claude interaction
-- ❌ Context switching between EA and Claude with no integration
-- ❌ Fails to leverage the MCP ecosystem and existing Sparx Japan server
 
 ## Related Decisions
 
@@ -140,19 +131,18 @@ This decision is confirmed when:
 |-----|-------------|-------|
 | (future) ADR-0002: VM platform selection | Depends on | This ADR assumes VMware Fusion; would need revision if switching to Parallels or UTM |
 | (future) ADR-0003: EA model repository strategy | Extends | SQLite (.qea) vs. DBMS-hosted repository affects which path is available |
-| (future) ADR-0004: Claude skill for ArchiMate validation | Depends on | Validation rules in the SQLite MCP server should align with the Claude skill's ArchiMate reference |
+| (future) ADR-0004: Claude skill for ArchiMate validation | Depends on | Validation rules in the SQLite MCP server should align with the Claude skill’s ArchiMate reference |
 
 ## Review Trigger
 
 This decision should be re-evaluated if:
-- Sparx Systems releases a cross-platform MCP server (eliminating the need for the SSH bridge)
+- Sparx Systems releases a cross-platform MCP server
 - Sparx Systems releases a native macOS version of Enterprise Architect
-- MCP protocol adds native remote-over-SSH transport (making the custom bridge redundant)
+- MCP protocol adds native remote-over-SSH transport
 - The team migrates from VMware Fusion to a different virtualization platform
-- The team adopts a DBMS-hosted EA repository (PostgreSQL/Oracle) instead of .qea files
-- Claude Desktop drops support for STDIO-based local MCP servers
+- The team adopts a DBMS-hosted EA repository instead of .qea files
 
-**Scheduled review date**: March 2027 (or next EA version major upgrade)
+**Scheduled review date**: April 2027 (or next EA major version upgrade)
 
 ## Architecture View
 
@@ -160,20 +150,20 @@ This decision should be re-evaluated if:
 ┌─────────────────────────────────────────────────────────────────┐
 │  macOS Host (Apple Silicon)                                     │
 │                                                                 │
-│  ┌─────────────────────┐         ┌──────────────────────────┐  │
+│  ┌─────────────────────┐         ┌────────────────────────┐  │
 │  │ Claude Desktop       │         │ Claude Code CLI          │  │
 │  │ (MCP Client)         │         │ (MCP Client)             │  │
-│  └──┬──────────┬────────┘         └──┬──────────┬────────────┘  │
+│  └──┬─────────┬────────┘         └──┬─────────┬────────────┘  │
 │     │          │                     │          │               │
-│     │ STDIO    │ STDIO               │ STDIO    │ STDIO        │
+│  STDIO        STDIO                STDIO        STDIO            │
+│     │          │                     │          │               │
 │     ▼          ▼                     ▼          ▼               │
-│  ┌──────────┐ ┌────────────────┐  (same two servers)           │
+│  ┌──────────┐ ┌───────────────┐  (same two servers)           │
 │  │ EA SQLite│ │ SSH Bridge     │                               │
 │  │ Analyzer │ │ Proxy          │                               │
 │  │ (Python) │ │ (Python)       │                               │
-│  └──┬───────┘ └──┬─────────────┘                               │
+│  └──┬──────┘ └──┬─────────────┘                               │
 │     │            │ SSH (port 22)                                │
-│     │            │                                              │
 │     │            ▼                                              │
 │     │  ┌─────────────────────────────────────────┐             │
 │     │  │ Windows 11 ARM VM (VMware Fusion)        │             │
@@ -181,37 +171,28 @@ This decision should be re-evaluated if:
 │     │  │  OpenSSH ──▶ MCP3.exe ──COM──▶ Sparx EA │             │
 │     │  │  Server       (STDIO)           (running)│             │
 │     │  └─────────────────────────────────────────┘             │
-│     │                                                           │
 │     ▼                                                           │
 │  ┌──────────┐                                                   │
-│  │ .qea file│  (SQLite database — on shared folder or local)    │
-│  │ (model)  │                                                   │
+│  │ .qea file│  (SQLite — on shared folder or local)            │
 │  └──────────┘                                                   │
 └─────────────────────────────────────────────────────────────────┘
-
-Legend:
-  ──STDIO──▶   MCP JSON-RPC over standard I/O
-  ──SSH──▶     Encrypted tunnel (piped STDIO)
-  ──COM──▶     Windows COM Automation (EA.Repository)
-  ──SQLite──▶  Direct database read (read-only)
 ```
 
 ## Component Inventory
 
 | Component | Location | Language | Lines | Dependencies | Maintainer |
 |-----------|----------|----------|-------|--------------|------------|
-| ea-sqlite-mcp.py | ~/.ea-mcp/ | Python 3.10+ | ~400 | mcp[cli], sqlite3 (stdlib) | Architecture team |
-| bridge-ea-mcp.py | ~/.ea-mcp/ | Python 3.10+ | ~120 | ssh (system), subprocess (stdlib) | Architecture team |
-| install-mcp-servers.sh | repo | Bash | ~250 | uv or pip, ssh-keygen | Architecture team |
+| ea-sqlite-mcp.py | ~/.ea-mcp/ | Python 3.10+ | ~900 | mcp[cli], sqlite3 (stdlib) | Architecture team |
+| bridge-ea-mcp.py | ~/.ea-mcp/ | Python 3.10+ | ~210 | ssh (system), subprocess (stdlib) | Architecture team |
+| install-mcp-servers.sh | repo/mcp-servers/ | Bash | ~360 | uv or pip, ssh-keygen, python3 | Architecture team |
 | MCP3.exe | EA\MCP_Server\ | .NET 9.0 | N/A (binary) | EA COM, .NET Runtime | Sparx Systems Japan |
-| autounattend.xml | repo/shared/ | XML | ~120 | Windows Setup | Architecture team |
-| vm.sh | repo | Bash | ~80 | vmrun (VMware Fusion) | Architecture team |
+| autounattend.xml | repo/vm-setup/shared/ | XML | ~150 | Windows Setup | Architecture team |
+| vm.sh | repo/vm-setup/ | Bash | ~80 | vmrun (VMware Fusion) | Architecture team |
 
 ## More Information
 
-- Sparx Japan MCP Server documentation: https://www.sparxsystems.jp/en/MCP/
+- Sparx Japan MCP Server: https://www.sparxsystems.jp/en/MCP/
 - MCP Protocol specification: https://modelcontextprotocol.io/
-- EA database schema: "Inside Enterprise Architect" by Thomas Kilian (leanpub.com/InsideEA)
-- VMware Fusion vmrun CLI: https://docs.vmware.com/en/VMware-Fusion/13/com.vmware.fusion.using.doc/GUID-A28FA25B-5529-4D95-9F7B-4CFBB8DF2AA7.html
+- EA database schema: “Inside Enterprise Architect” by Thomas Kilian (leanpub.com/InsideEA)
 - ArchiMate 3.2 Specification: The Open Group (opengroup.org)
 - MADR v4.0.0 template: https://adr.github.io/madr/
