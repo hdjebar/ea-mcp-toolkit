@@ -2,7 +2,7 @@
 #===============================================================================
 # 01-setup-vmware-fusion.sh
 # Downloads VMware Fusion prerequisites, the tiny11 Windows ISO, and the
-# Sparx EA trial MSI.  Run on your Mac host before 02-create-win11-vm.sh.
+# Sparx EA MSI.  Run on your Mac host before 02-create-win11-vm.sh.
 #===============================================================================
 
 set -euo pipefail
@@ -12,7 +12,6 @@ VMRUN="/Applications/VMware Fusion.app/Contents/Library/vmrun"
 VM_DIR="$HOME/Virtual Machines.localized"
 LOG_FILE="$SCRIPT_DIR/setup.log"
 
-# Minimum supported Fusion version
 FUSION_MIN_MAJOR=13
 FUSION_MIN_MINOR=5
 
@@ -42,22 +41,35 @@ TINY11_X64_SHA256="92484F2B7F707E42383294402A9EABBADEAA5EDE80AC633390AE7F3537E36
 #===============================================================================
 # Sparx EA MSI catalogue
 #
-# Trial (no authentication required):
-#   Sparx exposes a stable public URL for the latest trial MSI.
-#   EA 16+ ships separate x86 and x64 installers; the x64 variant is preferred
-#   for tiny11 on 64-bit Windows 11.
+# Three editions are available; set EA_EDITION in .env to select:
 #
-# Licensed (authentication required):
-#   The registered-user area (https://sparxsystems.com/registered/ea_down.html)
-#   is behind a login wall that does not expose a scriptable endpoint.
-#   To use your licensed MSI: place easetupfull.msi in ./iso/ before running,
-#   or set EA_REG_USER and EA_REG_PASS in .env to suppress the trial download
-#   and be shown the manual download URL with your credentials.
+#   EA_EDITION=trial   (default)
+#     Full EA — 30-day trial, no auth required.
+#     MCP3.exe COM bridge works. All editions selectable on first launch.
+#     URL: https://www.sparxsystems.com/bin/easetup_x64.msi
+#
+#   EA_EDITION=lite
+#     EA Lite (Viewer) — permanently free, read-only, no auth required.
+#     Intended for distributing models to stakeholders / non-modellers.
+#     MCP3.exe COM bridge does NOT work with Lite (no automation API).
+#     The SQLite Analyzer MCP server on macOS is unaffected and still works.
+#     URL: https://www.sparxsystems.com/bin/ealite_x64.msi
+#
+#   EA_EDITION=licensed
+#     Full licensed EA — requires Sparx registered-user credentials.
+#     Place easetupfull.msi in ./iso/ manually, or set EA_REG_USER +
+#     EA_REG_PASS in .env to be shown the registered download page.
+#     URL: https://sparxsystems.com/registered/ea_down.html (login required)
 #===============================================================================
 EA_BASE_URL="https://www.sparxsystems.com/bin"
-EA_TRIAL_X64_URL="${EA_BASE_URL}/easetup_x64.msi"   # EA 16+ 64-bit trial
-EA_TRIAL_URL="${EA_BASE_URL}/easetup.msi"            # EA universal trial fallback
+
+EA_TRIAL_X64_URL="${EA_BASE_URL}/easetup_x64.msi"
+EA_TRIAL_URL="${EA_BASE_URL}/easetup.msi"          # universal fallback
 EA_TRIAL_DEST="$SCRIPT_DIR/iso/easetup.msi"
+
+EA_LITE_URL="${EA_BASE_URL}/ealite_x64.msi"
+EA_LITE_DEST="$SCRIPT_DIR/iso/ealite_x64.msi"
+
 EA_LICENSED_DEST="$SCRIPT_DIR/iso/easetupfull.msi"
 
 #===============================================================================
@@ -68,7 +80,7 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     set -a; source "$SCRIPT_DIR/.env"; set +a  # shellcheck source=/dev/null
 fi
 
-# Optional licensed-user credentials (set in .env to skip trial download)
+: "${EA_EDITION:=trial}"   # trial | lite | licensed
 : "${EA_REG_USER:=}"
 : "${EA_REG_PASS:=}"
 
@@ -226,76 +238,112 @@ fi
 #===============================================================================
 # STEP 7: Sparx EA MSI
 #
-# Priority order:
-#   1. ./iso/easetupfull.msi  — licensed MSI placed here manually
-#   2. ./iso/easetup.msi      — trial already downloaded in a previous run
-#   3. Auto-download trial    — unless EA_REG_USER/EA_REG_PASS set in .env
+# Controlled by EA_EDITION (set in .env or environment):
+#   trial    — full EA, 30-day, no auth (default)
+#   lite     — EA Lite (Viewer), permanently free, read-only, no auth
+#   licensed — full licensed EA; place easetupfull.msi manually or set creds
+#
+# MCP capability summary:
+#   Edition   | SQLite Analyzer MCP | Sparx EA Bridge MCP (MCP3.exe)
+#   --------- | ------------------- | ------------------------------
+#   Lite      | ✅ full              | ❌ no COM automation API
+#   Trial     | ✅ full              | ✅ full (30-day window)
+#   Licensed  | ✅ full              | ✅ full (permanent)
 #===============================================================================
-log "=== Step 7: Sparx EA MSI ==="
+log "=== Step 7: Sparx EA MSI (edition: $EA_EDITION) ==="
 
-if [ -f "$EA_LICENSED_DEST" ]; then
-    log "✅ Licensed MSI found: $EA_LICENSED_DEST — skipping download"
-
-elif [ -f "$EA_TRIAL_DEST" ]; then
-    log "✅ Trial MSI already present: $EA_TRIAL_DEST"
-
-elif [ -n "$EA_REG_USER" ] && [ -n "$EA_REG_PASS" ]; then
-    # Registered-user area does not expose a scriptable download endpoint.
-    # Print the URL and credentials so the user can fetch the licensed MSI.
-    log ""
-    log "╔══════════════════════════════════════════════════════════════════╗"
-    log "║  Licensed MSI — manual download required                       ║"
-    log "║                                                                ║"
-    log "║  1. Open: https://sparxsystems.com/registered/ea_down.html     ║"
-    log "║  2. Log in with:  EA_REG_USER / EA_REG_PASS  (from .env)       ║"
-    log "║  3. Download easetupfull.msi and place it at:                  ║"
-    log "║       $EA_LICENSED_DEST"
-    log "║  4. Re-run this script (step 7 will skip the trial download)    ║"
-    log "╚══════════════════════════════════════════════════════════════════╝"
-    open "https://sparxsystems.com/registered/ea_down.html" 2>/dev/null || true
-
-else
-    # Auto-download the public trial MSI — no authentication required.
-    # Try the x64-specific installer first (EA 16+); fall back to the
-    # universal easetup.msi if the x64 URL returns an error.
-    log "Downloading Sparx EA trial MSI…"
-
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --head "$EA_TRIAL_X64_URL")
-    if [ "$HTTP_CODE" = "200" ]; then
-        log "  Using x64 installer: $EA_TRIAL_X64_URL"
-        _download "$EA_TRIAL_X64_URL" "$EA_TRIAL_DEST"
-    else
-        log "  x64 installer not available (HTTP $HTTP_CODE) — falling back to universal"
-        log "  Using: $EA_TRIAL_URL"
-        _download "$EA_TRIAL_URL" "$EA_TRIAL_DEST"
-    fi
-
-    # Sanity check — MSI should be at least 50 MB
-    if [ -f "$EA_TRIAL_DEST" ]; then
-        EA_SIZE=$(stat -f%z "$EA_TRIAL_DEST" 2>/dev/null || stat -c%s "$EA_TRIAL_DEST")
-        if (( EA_SIZE < 50000000 )); then
-            log "❌ EA MSI is suspiciously small ($((EA_SIZE/1024/1024)) MB) — download may have failed."
-            rm -f "$EA_TRIAL_DEST"
-            log "   Try downloading manually: $EA_TRIAL_URL"
-            log "   Place the file at: $EA_TRIAL_DEST"
-        else
-            log "✅ EA trial MSI downloaded ($((EA_SIZE/1024/1024)) MB)"
-            log "   30-day trial — all editions selectable on first launch."
-            log "   To use a licensed copy instead, place easetupfull.msi at:"
-            log "   $EA_LICENSED_DEST and re-run; this step will skip."
+_check_msi_size() {
+    local dest="$1" label="$2"
+    if [ -f "$dest" ]; then
+        local sz
+        sz=$(stat -f%z "$dest" 2>/dev/null || stat -c%s "$dest")
+        if (( sz < 50000000 )); then
+            log "❌ $label MSI is too small ($((sz/1024/1024)) MB) — likely a failed download."
+            rm -f "$dest"
+            return 1
         fi
-    else
-        log "❌ EA MSI download failed. Download manually from:"
-        log "   https://sparxsystems.com/products/ea/trial/request.html"
-        log "   Place the file at: $EA_TRIAL_DEST"
+        log "✅ $label MSI downloaded ($((sz/1024/1024)) MB)"
+        return 0
     fi
-fi
+    log "❌ $label MSI not found after download."
+    return 1
+}
+
+case "$EA_EDITION" in
+
+  lite)
+    if [ -f "$EA_LITE_DEST" ]; then
+        log "✅ EA Lite already present: $EA_LITE_DEST"
+    else
+        log "Downloading EA Lite (Viewer) — free, read-only, no auth required…"
+        log "  from: $EA_LITE_URL"
+        _download "$EA_LITE_URL" "$EA_LITE_DEST"
+        _check_msi_size "$EA_LITE_DEST" "EA Lite" || {
+            log "   Manual download: $EA_LITE_URL"
+            log "   Place at: $EA_LITE_DEST"
+        }
+    fi
+    log ""
+    log "ℹ️  EA Lite is a read-only viewer — no model editing."
+    log "   MCP3.exe COM bridge is NOT supported with Lite."
+    log "   The SQLite Analyzer MCP server on macOS is fully supported."
+    log "   Set EA_EDITION=trial in .env to get full MCP write capability."
+    ;;
+
+  licensed)
+    if [ -f "$EA_LICENSED_DEST" ]; then
+        log "✅ Licensed MSI found: $EA_LICENSED_DEST"
+    else
+        log ""
+        log "╔══════════════════════════════════════════════════════════════════╗"
+        log "║  Licensed MSI — manual download required                       ║"
+        log "║                                                                ║"
+        log "║  The Sparx registered-user area has no scriptable endpoint.    ║"
+        log "║                                                                ║"
+        log "║  1. Open: https://sparxsystems.com/registered/ea_down.html     ║"
+        if [ -n "$EA_REG_USER" ]; then
+        log "║  2. Log in with EA_REG_USER / EA_REG_PASS from .env            ║"
+        else
+        log "║  2. Log in with your Sparx registered-user credentials         ║"
+        fi
+        log "║  3. Download easetupfull.msi (x64) and place it at:            ║"
+        log "║       $EA_LICENSED_DEST"
+        log "║  4. Re-run this script — step 7 will detect it and skip        ║"
+        log "╚══════════════════════════════════════════════════════════════════╝"
+        open "https://sparxsystems.com/registered/ea_down.html" 2>/dev/null || true
+    fi
+    ;;
+
+  trial|*)
+    if [ -f "$EA_LICENSED_DEST" ]; then
+        log "✅ Licensed MSI found: $EA_LICENSED_DEST — using it (overrides trial)"
+    elif [ -f "$EA_TRIAL_DEST" ]; then
+        log "✅ Trial MSI already present: $EA_TRIAL_DEST"
+    else
+        log "Downloading EA trial MSI — no auth required…"
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --head "$EA_TRIAL_X64_URL")
+        if [ "$HTTP_CODE" = "200" ]; then
+            log "  Using x64 installer: $EA_TRIAL_X64_URL"
+            _download "$EA_TRIAL_X64_URL" "$EA_TRIAL_DEST"
+        else
+            log "  x64 URL returned HTTP $HTTP_CODE — falling back to universal"
+            _download "$EA_TRIAL_URL" "$EA_TRIAL_DEST"
+        fi
+        _check_msi_size "$EA_TRIAL_DEST" "EA trial" || {
+            log "   Manual download: https://sparxsystems.com/products/ea/trial/request.html"
+            log "   Place at: $EA_TRIAL_DEST"
+        }
+        log "   30-day trial — all editions selectable on first launch."
+        log "   MCP3.exe COM bridge fully supported."
+    fi
+    ;;
+esac
 
 #===============================================================================
 # DONE
 #===============================================================================
 log ""
 log "=== Prerequisites complete ==="
-log "ISO : $ISO_DEST"
-log "MSI : ${EA_LICENSED_DEST:-$EA_TRIAL_DEST}"
-log "Next: run ./02-create-win11-vm.sh"
+log "ISO     : $ISO_DEST"
+log "Edition : $EA_EDITION"
+log "Next    : run ./02-create-win11-vm.sh"
