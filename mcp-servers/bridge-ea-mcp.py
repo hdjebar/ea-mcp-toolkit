@@ -10,14 +10,14 @@ Usage:
   python3 bridge-ea-mcp.py
 
 Environment variables:
-  EA_VM_HOST     - Windows VM IP or hostname (default: from vm.sh ip)
+  EA_VM_HOST     - Windows VM IP or hostname (required, or auto-detected via vmrun)
   EA_VM_USER     - Windows VM username (default: architect)
   EA_VM_PORT     - SSH port (default: 22)
   EA_VM_KEY      - Path to SSH private key (optional, uses ssh-agent if unset)
-  EA_MCP_PATH    - Path to MCP3.exe on Windows (auto-detected)
+  EA_MCP_PATH    - Path to MCP3.exe on Windows (auto-detected from known install paths)
   EA_MCP_EDIT    - Set to "1" to enable -enableEdit flag (default: 1)
 
-Claude Desktop config (~/Library/Application Support/Claude/claude_desktop_config.json):
+Claude Desktop config (~/.../Claude/claude_desktop_config.json):
   {
     "mcpServers": {
       "Sparx EA (VM)": {
@@ -25,46 +25,51 @@ Claude Desktop config (~/Library/Application Support/Claude/claude_desktop_confi
         "args": ["/path/to/bridge-ea-mcp.py"],
         "env": {
           "EA_VM_HOST": "192.168.75.128",
-          "EA_VM_USER": "architect"
+          "EA_VM_USER": "architect",
+          "EA_VM_KEY":  "~/.ssh/ea_vm_ed25519"
         }
       }
     }
   }
-
-Claude Code:
-  claude mcp add --transport stdio "Sparx EA (VM)" \
-    -- python3 /path/to/bridge-ea-mcp.py
 """
 
 import os
 import sys
+import shlex
 import signal
 import subprocess
 import shutil
-import json
+import time
 import logging
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-VM_HOST = os.environ.get("EA_VM_HOST", "")
-VM_USER = os.environ.get("EA_VM_USER", "architect")
-VM_PORT = os.environ.get("EA_VM_PORT", "22")
-VM_KEY = os.environ.get("EA_VM_KEY", "")
+VM_HOST    = os.environ.get("EA_VM_HOST", "")
+VM_USER    = os.environ.get("EA_VM_USER", "architect")
+VM_PORT    = os.environ.get("EA_VM_PORT", "22")
+VM_KEY     = os.environ.get("EA_VM_KEY", "")
 ENABLE_EDIT = os.environ.get("EA_MCP_EDIT", "1") == "1"
 
-# MCP3.exe search paths on Windows (tried in order)
-MCP_PATHS = [
-    os.environ.get("EA_MCP_PATH", ""),
-    r"C:\Program Files\Sparx Systems\EA\MCP_Server\MCP3.exe",
-    r"C:\Program Files (x86)\Sparx Systems\EA\MCP_Server\MCP3.exe",
+# Known MCP3.exe install paths on Windows (tried in order)
+_MCP_PATH_ENV = os.environ.get("EA_MCP_PATH", "")
+MCP_CANDIDATE_PATHS = [
+    p for p in [
+        _MCP_PATH_ENV,
+        r"C:\Program Files\Sparx Systems\EA\MCP_Server\MCP3.exe",
+        r"C:\Program Files (x86)\Sparx Systems\EA\MCP_Server\MCP3.exe",
+    ] if p
 ]
+
+# Reconnect settings
+MAX_RETRIES   = 3
+RETRY_DELAYS  = [2, 4, 8]   # seconds between attempts
 
 LOG_FILE = os.path.expanduser("~/bridge-ea-mcp.log")
 
 # ---------------------------------------------------------------------------
-# Logging (to file only — stdout/stdin are the MCP transport)
+# Logging (file only — stdout/stdin are the MCP STDIO transport)
 # ---------------------------------------------------------------------------
 
 logging.basicConfig(
@@ -76,11 +81,11 @@ log = logging.getLogger("bridge-ea-mcp")
 
 
 def resolve_vm_host() -> str:
-    """Try to auto-detect VM IP if not explicitly set."""
+    """Return the VM IP, auto-detecting via vmrun if EA_VM_HOST is not set."""
     if VM_HOST:
         return VM_HOST
 
-    # Try the vm.sh helper from setup-ea-vm
+    # Try vm.sh helper from the vm-setup directory
     vm_sh = os.path.expanduser("~/setup-ea-vm/vm.sh")
     if os.path.isfile(vm_sh):
         try:
@@ -88,121 +93,126 @@ def resolve_vm_host() -> str:
                 [vm_sh, "ip"], capture_output=True, text=True, timeout=10
             )
             ip = result.stdout.strip()
-            if ip and ip != "unknown":
-                log.info(f"Auto-detected VM IP from vm.sh: {ip}")
+            if ip and ip not in ("unknown", ""):
+                log.info(f"Auto-detected VM IP via vm.sh: {ip}")
                 return ip
-        except Exception as e:
-            log.warning(f"vm.sh ip failed: {e}")
+        except Exception as exc:
+            log.warning(f"vm.sh ip failed: {exc}")
 
-    # Try vmrun directly
+    # Try vmrun directly — note: getGuestIPAddress does NOT require guest credentials
     vmrun = "/Applications/VMware Fusion.app/Contents/Library/vmrun"
-    vmx_glob = os.path.expanduser(
+    vmx   = os.path.expanduser(
         "~/Virtual Machines.localized/Windows11-EA.vmwarevm/Windows11-EA.vmx"
     )
-    if os.path.isfile(vmrun) and os.path.isfile(vmx_glob):
+    if os.path.isfile(vmrun) and os.path.isfile(vmx):
         try:
             result = subprocess.run(
-                [vmrun, "-gu", VM_USER, "-gp", "", "getGuestIPAddress", vmx_glob],
-                capture_output=True,
-                text=True,
-                timeout=10,
+                [vmrun, "getGuestIPAddress", vmx],
+                capture_output=True, text=True, timeout=10,
             )
             ip = result.stdout.strip()
             if ip and "Error" not in ip:
-                log.info(f"Auto-detected VM IP from vmrun: {ip}")
+                log.info(f"Auto-detected VM IP via vmrun: {ip}")
                 return ip
         except Exception:
             pass
 
-    log.error("Cannot determine VM IP. Set EA_VM_HOST environment variable.")
+    log.error("Cannot determine VM IP. Set EA_VM_HOST in your environment.")
     sys.exit(1)
 
 
 def find_mcp_path() -> str:
-    """Return the first valid MCP3.exe path."""
-    for path in MCP_PATHS:
-        if path:
-            return path
-    return r"C:\Program Files\Sparx Systems\EA\MCP_Server\MCP3.exe"
+    """Return the configured MCP3.exe path (existence verified on the remote side)."""
+    return MCP_CANDIDATE_PATHS[0] if MCP_CANDIDATE_PATHS else \
+        r"C:\Program Files\Sparx Systems\EA\MCP_Server\MCP3.exe"
 
 
 def build_ssh_command(host: str) -> list[str]:
-    """Build the SSH command that launches MCP3.exe on the Windows VM."""
+    """Build the SSH argv list that launches MCP3.exe on the Windows VM."""
     ssh = shutil.which("ssh")
     if not ssh:
-        log.error("ssh not found on PATH")
+        log.error("ssh binary not found on PATH")
         sys.exit(1)
 
     mcp_path = find_mcp_path()
-    mcp_args = "-enableEdit" if ENABLE_EDIT else ""
-
-    # Build the remote command
-    # On Windows OpenSSH, the command is executed via cmd.exe
-    remote_cmd = f'"{mcp_path}"'
-    if mcp_args:
-        remote_cmd += f" {mcp_args}"
+    # shlex.quote() prevents shell metacharacters in EA_MCP_PATH from being
+    # interpreted by the remote shell.
+    quoted_path = shlex.quote(mcp_path)
+    mcp_args   = "-enableEdit" if ENABLE_EDIT else ""
+    remote_cmd = f"{quoted_path} {mcp_args}".strip()
 
     cmd = [
         ssh,
-        "-T",  # No TTY allocation (pure pipe)
+        "-T",                                  # No TTY (pure pipe)
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", "ConnectTimeout=15",
         "-o", "ServerAliveInterval=30",
         "-o", "ServerAliveCountMax=3",
         "-p", VM_PORT,
     ]
-
     if VM_KEY:
         cmd.extend(["-i", VM_KEY])
-
     cmd.append(f"{VM_USER}@{host}")
     cmd.append(remote_cmd)
 
     return cmd
 
 
-def main():
-    """Launch SSH tunnel and pipe STDIO bidirectionally."""
+def main() -> None:
+    """Launch SSH tunnel and pipe STDIO bidirectionally, with automatic retry."""
     host = resolve_vm_host()
-    cmd = build_ssh_command(host)
+    cmd  = build_ssh_command(host)
 
-    log.info(f"Starting SSH bridge to {VM_USER}@{host}")
-    log.info(f"Command: {' '.join(cmd)}")
-
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdin=sys.stdin.buffer,
-            stdout=sys.stdout.buffer,
-            stderr=subprocess.PIPE,
+    for attempt in range(MAX_RETRIES):
+        log.info(
+            f"Starting SSH bridge to {VM_USER}@{host} "
+            f"(attempt {attempt + 1}/{MAX_RETRIES})"
         )
+        log.debug(f"Command: {' '.join(cmd)}")
 
-        # Forward SIGTERM/SIGINT to child
-        def handle_signal(signum, frame):
-            log.info(f"Received signal {signum}, terminating SSH tunnel")
-            proc.terminate()
-            sys.exit(0)
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=sys.stdin.buffer,
+                stdout=sys.stdout.buffer,
+                stderr=subprocess.PIPE,
+            )
 
-        signal.signal(signal.SIGTERM, handle_signal)
-        signal.signal(signal.SIGINT, handle_signal)
+            def handle_signal(signum, frame):
+                log.info(f"Received signal {signum}, terminating")
+                proc.terminate()
+                sys.exit(0)
 
-        # Wait for process to complete
-        exit_code = proc.wait()
+            signal.signal(signal.SIGTERM, handle_signal)
+            signal.signal(signal.SIGINT,  handle_signal)
 
-        # Log any stderr from SSH
-        stderr_output = proc.stderr.read().decode("utf-8", errors="replace")
-        if stderr_output:
-            log.warning(f"SSH stderr: {stderr_output}")
+            exit_code = proc.wait()
+            stderr_out = proc.stderr.read().decode("utf-8", errors="replace")
+            if stderr_out:
+                log.warning(f"SSH stderr: {stderr_out}")
 
-        log.info(f"SSH bridge exited with code {exit_code}")
-        sys.exit(exit_code)
+            if exit_code == 0:
+                log.info("SSH bridge exited cleanly.")
+                sys.exit(0)
 
-    except FileNotFoundError:
-        log.error("ssh binary not found")
-        sys.exit(1)
-    except Exception as e:
-        log.error(f"Bridge error: {e}")
-        sys.exit(1)
+            log.warning(f"SSH bridge exited with code {exit_code}")
+
+        except FileNotFoundError:
+            log.error("ssh binary not found")
+            sys.exit(1)
+        except Exception as exc:
+            log.error(f"Bridge error: {exc}")
+
+        if attempt < MAX_RETRIES - 1:
+            delay = RETRY_DELAYS[attempt]
+            log.info(f"Retrying in {delay}s (attempt {attempt + 2}/{MAX_RETRIES})...")
+            time.sleep(delay)
+            # Re-resolve host — VM IP may have changed after a NAT re-address
+            host = resolve_vm_host()
+            cmd  = build_ssh_command(host)
+
+    log.error(f"SSH bridge failed after {MAX_RETRIES} attempts. Exiting.")
+    sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 Hybrid MCP integration for Sparx Enterprise Architect on macOS — combining an SSH bridge to the Windows VM with a native SQLite model analyzer.
 
-See [ADR-0001](ADR-0001-hybrid-mcp-integration-sparx-ea-macos.md) for the full architecture decision record.
+See [ADR-0001](../docs/ADR-0001-hybrid-mcp-integration-sparx-ea-macos.md) for the full architecture decision record.
 
 ## Quick Install
 
@@ -29,23 +29,28 @@ Reads `.qea` files directly via SQLite. No VM, no EA installation required.
 | `list_packages` | Package hierarchy with element counts |
 | `list_diagrams` | Diagram inventory with types and element counts |
 | `query_sql` | Raw read-only SQL for advanced queries |
+| `generate_dependency_diagram` | Mermaid dependency graph artifact |
+| `generate_layer_diagram` | ArchiMate layer view as Mermaid artifact |
+| `generate_catalog` | Interactive React/HTML element/relationship catalogs |
+| `get_diagram_layout` | Exact EA element positions for React rendering |
+| `export_model_for_explorer` | Full model export for EA Explorer artifact |
 
 **Example prompts:**
-- "Analyze the model at ~/models/architecture.qea"
-- "Show all ArchiMate business processes and their serving relationships"
-- "Trace the impact of changing the CRM System — 3 hops deep"
-- "Validate all ArchiMate relationships in the model"
+- `"Analyze the model at ~/models/architecture.qea"`
+- `"Show all ArchiMate business processes and their serving relationships"`
+- `"Trace the impact of changing the CRM System — 3 hops deep"`
+- `"Validate all ArchiMate relationships in the model"`
 
 ### Sparx EA Bridge (SSH to Windows VM)
 
 Tunnels MCP traffic to the Sparx Japan MCP3.exe running in the Windows VM. Exposes all 30+ tools from the official server including live diagram access and element creation.
 
-**Requires:** VM running, EA open with model loaded, OpenSSH Server enabled.
+**Requires:** VM running, EA open with model loaded, OpenSSH Server enabled in Windows.
 
 **Example prompts:**
-- "Get the current diagram from EA"
-- "Create an Application Component called 'Payment Gateway'"
-- "Find all elements named 'Customer' in the EA model"
+- `"Get the current diagram from EA"`
+- `"Create an Application Component called 'Payment Gateway'"`
+- `"Find all elements named 'Customer' in the EA model"`
 
 ## Manual Configuration
 
@@ -58,7 +63,10 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
   "mcpServers": {
     "EA Model Analyzer": {
       "command": "uv",
-      "args": ["run", "--with", "mcp[cli]", "python", "~/.ea-mcp/ea-sqlite-mcp.py"]
+      "args": ["run", "--with", "mcp[cli]", "python", "~/.ea-mcp/ea-sqlite-mcp.py"],
+      "env": {
+        "EA_MODEL_PATH": "~/models/architecture.qea"
+      }
     },
     "Sparx EA (VM)": {
       "command": "python3",
@@ -66,17 +74,20 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
       "env": {
         "EA_VM_HOST": "192.168.75.128",
         "EA_VM_USER": "architect",
-        "EA_VM_KEY": "~/.ssh/ea_vm_ed25519"
+        "EA_VM_KEY":  "~/.ssh/ea_vm_ed25519"
       }
     }
   }
 }
 ```
 
+`EA_MODEL_PATH` is optional — if set, you don't need to pass `qea_path` on every prompt.
+
 ### Claude Code
 
 ```bash
 claude mcp add --transport stdio "EA Model Analyzer" \
+  --env EA_MODEL_PATH=~/models/architecture.qea \
   -- uv run --with "mcp[cli]" python ~/.ea-mcp/ea-sqlite-mcp.py
 
 claude mcp add --transport stdio "Sparx EA (VM)" \
@@ -105,9 +116,12 @@ Set-Service -Name sshd -StartupType Automatic
 
 ```
 mcp-servers/
-├── ea-sqlite-mcp.py                              # Native SQLite MCP server
-├── bridge-ea-mcp.py                               # SSH bridge proxy
-├── install-mcp-servers.sh                         # One-command installer
-├── ADR-0001-hybrid-mcp-integration-sparx-ea-macos.md  # Architecture decision
-└── README.md                                      # This file
+├── ea-sqlite-mcp.py      # Native SQLite MCP server (read-only, macOS/Linux/Windows)
+├── bridge-ea-mcp.py      # SSH bridge proxy (macOS → Windows VM)
+├── install-mcp-servers.sh # One-command installer
+├── requirements.txt       # Python dependency pin
+└── README.md              # This file
+
+docs/
+└── ADR-0001-hybrid-mcp-integration-sparx-ea-macos.md  # Architecture decision record
 ```

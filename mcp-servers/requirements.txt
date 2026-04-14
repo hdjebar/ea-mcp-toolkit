@@ -1,0 +1,7 @@
+# Python dependencies for ea-mcp-toolkit MCP servers
+# Install with:  pip install -r requirements.txt
+# Or with uv:    uv pip install -r requirements.txt
+#
+# The MCP package is the only runtime dependency.
+# sqlite3 is part of the Python standard library.
+mcp[cli]>=1.0.0

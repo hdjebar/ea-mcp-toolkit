@@ -14,7 +14,8 @@ venv/
 *.log
 setup.log
 
-# Secrets / credentials
+# Secrets / credentials — NEVER commit these
+.env
 *.key
 *.pem
 key.dat
