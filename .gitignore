@@ -20,6 +20,10 @@ setup.log
 *.pem
 key.dat
 
+# Generated files that contain plaintext credentials
+vm-setup/shared/autounattend.xml
+vm-setup/shared/scripts/
+
 # VM files (too large for git)
 *.vmdk
 *.vmem

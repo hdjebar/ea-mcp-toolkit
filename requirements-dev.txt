@@ -1,0 +1,5 @@
+# Runtime dependency (both servers)
+mcp[cli]>=1.0.0
+
+# Development / test dependencies (not needed to run the servers)
+pytest>=8.0

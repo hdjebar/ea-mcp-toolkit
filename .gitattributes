@@ -1,0 +1,8 @@
+# Override GitHub Linguist language detection.
+# ea-sqlite-mcp.py returns React/JSX template strings as tool output;
+# Linguist counts those embedded strings as JavaScript.
+*.py    linguist-language=Python
+*.sh    linguist-language=Shell
+*.ps1   linguist-language=PowerShell
+*.json  linguist-language=JSON
+*.xml   linguist-language=XML
