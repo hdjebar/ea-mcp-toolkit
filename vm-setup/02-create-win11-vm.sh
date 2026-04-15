@@ -1,9 +1,9 @@
 #!/bin/bash
 #===============================================================================
 # 02-create-win11-vm.sh
-# Creates a Windows 11 ARM/x64 VM in VMware Fusion via command line
-# Generates .vmx config and autounattend.xml for unattended installation
-# Run on your Mac host
+# Creates a Windows 11 ARM/x64 VM in VMware Fusion via command line.
+# Generates .vmx config and autounattend.xml for unattended installation.
+# Run on your Mac host after 01-setup-vmware-fusion.sh.
 #===============================================================================
 
 set -euo pipefail
@@ -16,24 +16,34 @@ VMX_DIR="$VM_DIR/${VM_NAME}.vmwarevm"
 VMX_FILE="$VMX_DIR/${VM_NAME}.vmx"
 LOG_FILE="$SCRIPT_DIR/setup.log"
 
-# VM Configuration — adjust as needed
-VM_RAM_MB=8192          # 8 GB RAM (min 4096 for Win11)
-VM_CPUS=4               # 4 CPU cores
-VM_DISK_GB=80           # 80 GB disk (EA needs ~2GB, models can grow)
-VM_DISK_SIZE=$((VM_DISK_GB * 1024))  # Convert to MB
-
-# Windows credentials for autounattend
-WIN_USER="architect"
-WIN_PASS="Sparx2026!"
-WIN_HOSTNAME="EA-WORKSTATION"
+# VM hardware sizing
+VM_RAM_MB=8192
+VM_CPUS=4
+VM_DISK_GB=80
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
 ARCH=$(uname -m)
 
 #===============================================================================
-# STEP 1: Check for VMware Fusion
+# Load credentials from .env (same directory as the script).
+# Defaults are provided for every variable so the script still works when
+# .env is absent.  Copy vm-setup/.env.example to vm-setup/.env and edit
+# it before running setup.
 #===============================================================================
-log "=== Creating Windows 11 VM ==="
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    log "Loading credentials from .env"
+    set -a; source "$SCRIPT_DIR/.env"; set +a
+fi
+
+# Credentials with defaults (overridable via .env)
+WIN_USER="${WIN_USER:-architect}"
+WIN_PASS="${WIN_PASS:-Sparx2026!}"
+WIN_HOSTNAME="${WIN_HOSTNAME:-EA-WORKSTATION}"
+
+#===============================================================================
+# STEP 1: Pre-flight checks
+#===============================================================================
+log "=== Creating Windows 11 VM ($VM_NAME) ==="
 
 if [ ! -f "$VMRUN" ]; then
     log "❌ VMware Fusion not installed. Run 01-setup-vmware-fusion.sh first."
@@ -47,41 +57,40 @@ log "=== Step 1: Creating VM directory ==="
 
 if [ -d "$VMX_DIR" ]; then
     log "⚠️  VM directory already exists: $VMX_DIR"
-    read -p "Delete and recreate? (y/N): " -r
+    read -r -p "Delete and recreate? (y/N): " REPLY
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         rm -rf "$VMX_DIR"
     else
-        log "Aborting."
-        exit 0
+        log "Aborting."; exit 0
     fi
 fi
 
 mkdir -p "$VMX_DIR"
 
-# Create virtual disk
-log "=== Step 2: Creating ${VM_DISK_GB}GB virtual disk ==="
+log "=== Step 2: Creating ${VM_DISK_GB} GB virtual disk ==="
 VDISK_TOOL="/Applications/VMware Fusion.app/Contents/Library/vmware-vdiskmanager"
-
 if [ -f "$VDISK_TOOL" ]; then
     "$VDISK_TOOL" -c -s "${VM_DISK_GB}GB" -a lsilogic -t 0 "$VMX_DIR/${VM_NAME}.vmdk"
     log "✅ Virtual disk created"
 else
-    log "⚠️  vdiskmanager not found, disk will be created by Fusion on first boot"
+    log "⚠️  vdiskmanager not found — disk will be created by Fusion on first boot"
 fi
 
 #===============================================================================
-# STEP 3: Generate .vmx configuration file
+# STEP 3: Generate .vmx configuration
 #===============================================================================
 log "=== Step 3: Generating VMX configuration ==="
 
 if [[ "$ARCH" == "arm64" ]]; then
     GUEST_OS="arm-windows11-64"
     HW_VERSION="20"
-    FIRMWARE="efi"
+    PROC_ARCH="arm64"
+    WIN_ARCH="arm64"
 else
     GUEST_OS="windows11-64"
     HW_VERSION="20"
-    FIRMWARE="efi"
+    PROC_ARCH="amd64"
+    WIN_ARCH="amd64"
 fi
 
 cat > "$VMX_FILE" << VMXEOF
@@ -105,58 +114,48 @@ vmci0.present = "TRUE"
 hpet0.present = "TRUE"
 displayName = "$VM_NAME"
 guestOS = "$GUEST_OS"
-firmware = "$FIRMWARE"
+firmware = "efi"
 uefi.secureBoot.enabled = "TRUE"
 
-# Memory & CPU
 memsize = "$VM_RAM_MB"
 numvcpus = "$VM_CPUS"
 
-# Virtual disk
 scsi0.virtualDev = "lsisas1068"
 scsi0.present = "TRUE"
 scsi0:0.present = "TRUE"
 scsi0:0.fileName = "${VM_NAME}.vmdk"
 
-# CD/DVD - Windows ISO (patched by 01-setup-vmware-fusion.sh)
 sata0.present = "TRUE"
 sata0:0.present = "TRUE"
 sata0:0.fileName = ""
 sata0:0.deviceType = "cdrom-image"
 sata0:0.startConnected = "TRUE"
 
-# Second CD/DVD - autounattend ISO
 sata0:1.present = "TRUE"
 sata0:1.fileName = ""
 sata0:1.deviceType = "cdrom-image"
 sata0:1.startConnected = "TRUE"
 
-# Network - NAT
 ethernet0.present = "TRUE"
 ethernet0.connectionType = "nat"
 ethernet0.virtualDev = "vmxnet3"
 ethernet0.addressType = "generated"
 ethernet0.wakeOnPcktRcv = "FALSE"
 
-# USB
 usb.present = "TRUE"
 usb_xhci.present = "TRUE"
 
-# Sound
 sound.present = "TRUE"
 sound.virtualDev = "hdaudio"
 sound.autodetect = "TRUE"
 
-# Display
 svga.vramSize = "268435456"
 svga.graphicsMemoryKB = "262144"
 
-# vTPM (required for Windows 11)
-# NOTE: do NOT add encryption.keySafe here — Fusion generates it on first boot
+# NOTE: do NOT add encryption.keySafe here; Fusion generates it on first boot
 vtpm.present = "TRUE"
 managedvm.autoAddVTPM = "software"
 
-# Shared folders
 sharedFolder0.present = "TRUE"
 sharedFolder0.enabled = "TRUE"
 sharedFolder0.readAccess = "TRUE"
@@ -167,31 +166,29 @@ sharedFolder0.expiration = "never"
 sharedFolder.maxNum = "1"
 isolation.tools.hgfs.disable = "FALSE"
 
-# Power management
 powerType.powerOff = "soft"
 powerType.powerOn = "soft"
 powerType.suspend = "soft"
 powerType.reset = "soft"
 
-# Tools
 tools.syncTime = "TRUE"
 tools.upgrade.policy = "upgradeAtPowerCycle"
 VMXEOF
 
-log "✅ VMX configuration created at: $VMX_FILE"
+log "✅ VMX configuration created: $VMX_FILE"
 
 #===============================================================================
-# STEP 4: Create shared folder structure
+# STEP 4: Shared folder structure
 #===============================================================================
 log "=== Step 4: Creating shared folders ==="
 
-mkdir -p "$SCRIPT_DIR/shared/installers"
-mkdir -p "$SCRIPT_DIR/shared/scripts"
-mkdir -p "$SCRIPT_DIR/shared/licenses"
-mkdir -p "$SCRIPT_DIR/shared/models"
+mkdir -p \
+    "$SCRIPT_DIR/shared/installers" \
+    "$SCRIPT_DIR/shared/scripts" \
+    "$SCRIPT_DIR/shared/licenses" \
+    "$SCRIPT_DIR/shared/models"
 
-# Copy EA installer to shared folder — all three editions in priority order.
-# 02-install-sparx-ea.ps1 will detect which one is present and act accordingly.
+# Copy EA installer (highest priority first)
 for msi in \
     "$SCRIPT_DIR/iso/easetupfull.msi" \
     "$SCRIPT_DIR/iso/easetup.msi" \
@@ -203,35 +200,29 @@ for msi in \
     fi
 done
 
-log "✅ Shared folder structure created at: $SCRIPT_DIR/shared/"
+log "✅ Shared folders ready: $SCRIPT_DIR/shared/"
 
 #===============================================================================
 # STEP 5: Generate autounattend.xml
+# Placeholders are replaced by Python (handles any special characters in
+# credentials — sed breaks on passwords containing /, &, or \).
 #===============================================================================
 log "=== Step 5: Generating autounattend.xml ==="
 
-if [[ "$ARCH" == "arm64" ]]; then
-    PROC_ARCH="arm64"
-else
-    PROC_ARCH="amd64"
-fi
+AUTOUNATTEND_XML="$SCRIPT_DIR/shared/autounattend.xml"
 
-cat > "$SCRIPT_DIR/shared/autounattend.xml" << 'XMLEOF'
+cat > "$AUTOUNATTEND_XML" << 'XMLEOF'
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend"
           xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
 
-  <!-- ============================================================ -->
-  <!-- PASS 1: windowsPE — Disk partitioning & image selection      -->
-  <!-- ============================================================ -->
+  <!-- windowsPE: disk layout + image selection -->
   <settings pass="windowsPE">
     <component name="Microsoft-Windows-International-Core-WinPE"
-               processorArchitecture="PROC_ARCH_PLACEHOLDER"
+               processorArchitecture="%%PROC_ARCH%%"
                publicKeyToken="31bf3856ad364e35"
                language="neutral" versionScope="nonSxS">
-      <SetupUILanguage>
-        <UILanguage>en-US</UILanguage>
-      </SetupUILanguage>
+      <SetupUILanguage><UILanguage>en-US</UILanguage></SetupUILanguage>
       <InputLocale>en-US</InputLocale>
       <SystemLocale>en-US</SystemLocale>
       <UILanguage>en-US</UILanguage>
@@ -239,100 +230,62 @@ cat > "$SCRIPT_DIR/shared/autounattend.xml" << 'XMLEOF'
     </component>
 
     <component name="Microsoft-Windows-Setup"
-               processorArchitecture="PROC_ARCH_PLACEHOLDER"
+               processorArchitecture="%%PROC_ARCH%%"
                publicKeyToken="31bf3856ad364e35"
                language="neutral" versionScope="nonSxS">
-
       <DiskConfiguration>
         <Disk wcm:action="add">
           <DiskID>0</DiskID>
           <WillWipeDisk>true</WillWipeDisk>
           <CreatePartitions>
-            <CreatePartition wcm:action="add">
-              <Order>1</Order>
-              <Size>260</Size>
-              <Type>EFI</Type>
-            </CreatePartition>
-            <CreatePartition wcm:action="add">
-              <Order>2</Order>
-              <Size>16</Size>
-              <Type>MSR</Type>
-            </CreatePartition>
-            <CreatePartition wcm:action="add">
-              <Order>3</Order>
-              <Extend>true</Extend>
-              <Type>Primary</Type>
-            </CreatePartition>
+            <CreatePartition wcm:action="add"><Order>1</Order><Size>260</Size><Type>EFI</Type></CreatePartition>
+            <CreatePartition wcm:action="add"><Order>2</Order><Size>16</Size><Type>MSR</Type></CreatePartition>
+            <CreatePartition wcm:action="add"><Order>3</Order><Extend>true</Extend><Type>Primary</Type></CreatePartition>
           </CreatePartitions>
           <ModifyPartitions>
-            <ModifyPartition wcm:action="add">
-              <Order>1</Order>
-              <PartitionID>1</PartitionID>
-              <Format>FAT32</Format>
-              <Label>System</Label>
-            </ModifyPartition>
-            <ModifyPartition wcm:action="add">
-              <Order>2</Order>
-              <PartitionID>2</PartitionID>
-            </ModifyPartition>
-            <ModifyPartition wcm:action="add">
-              <Order>3</Order>
-              <PartitionID>3</PartitionID>
-              <Format>NTFS</Format>
-              <Label>Windows</Label>
-              <Letter>C</Letter>
-            </ModifyPartition>
+            <ModifyPartition wcm:action="add"><Order>1</Order><PartitionID>1</PartitionID><Format>FAT32</Format><Label>System</Label></ModifyPartition>
+            <ModifyPartition wcm:action="add"><Order>2</Order><PartitionID>2</PartitionID></ModifyPartition>
+            <ModifyPartition wcm:action="add"><Order>3</Order><PartitionID>3</PartitionID><Format>NTFS</Format><Label>Windows</Label><Letter>C</Letter></ModifyPartition>
           </ModifyPartitions>
         </Disk>
       </DiskConfiguration>
-
       <ImageInstall>
         <OSImage>
-          <InstallTo>
-            <DiskID>0</DiskID>
-            <PartitionID>3</PartitionID>
-          </InstallTo>
+          <InstallTo><DiskID>0</DiskID><PartitionID>3</PartitionID></InstallTo>
         </OSImage>
       </ImageInstall>
-
       <UserData>
         <AcceptEula>true</AcceptEula>
-        <FullName>WIN_USER_PLACEHOLDER</FullName>
+        <FullName>%%WIN_USER%%</FullName>
         <Organization>Enterprise Architecture</Organization>
       </UserData>
-
       <UseConfigurationSet>true</UseConfigurationSet>
     </component>
   </settings>
 
-  <!-- ============================================================ -->
-  <!-- PASS 4: specialize                                           -->
-  <!-- ============================================================ -->
+  <!-- specialize: hostname + locale -->
   <settings pass="specialize">
     <component name="Microsoft-Windows-Shell-Setup"
-               processorArchitecture="PROC_ARCH_PLACEHOLDER"
+               processorArchitecture="%%PROC_ARCH%%"
                publicKeyToken="31bf3856ad364e35"
                language="neutral" versionScope="nonSxS">
-      <ComputerName>WIN_HOSTNAME_PLACEHOLDER</ComputerName>
+      <ComputerName>%%WIN_HOSTNAME%%</ComputerName>
       <TimeZone>Romance Standard Time</TimeZone>
-      <RegisteredOwner>WIN_USER_PLACEHOLDER</RegisteredOwner>
+      <RegisteredOwner>%%WIN_USER%%</RegisteredOwner>
       <RegisteredOrganization>Enterprise Architecture</RegisteredOrganization>
     </component>
-
     <component name="Microsoft-Windows-Security-SPP-UX"
-               processorArchitecture="PROC_ARCH_PLACEHOLDER"
+               processorArchitecture="%%PROC_ARCH%%"
                publicKeyToken="31bf3856ad364e35"
                language="neutral" versionScope="nonSxS">
       <SkipAutoActivation>true</SkipAutoActivation>
     </component>
   </settings>
 
-  <!-- ============================================================ -->
-  <!-- PASS 7: oobeSystem — User account & OOBE skip               -->
-  <!-- ============================================================ -->
+  <!-- oobeSystem: account creation + OOBE skip + first-logon scripts -->
   <settings pass="oobeSystem">
     <component name="Microsoft-Windows-International-Core"
-               processorArchitecture="PROC_ARCH_PLACEHOLDER"
+               processorArchitecture="%%PROC_ARCH%%"
                publicKeyToken="31bf3856ad364e35"
                language="neutral" versionScope="nonSxS">
       <InputLocale>en-US</InputLocale>
@@ -342,7 +295,7 @@ cat > "$SCRIPT_DIR/shared/autounattend.xml" << 'XMLEOF'
     </component>
 
     <component name="Microsoft-Windows-Shell-Setup"
-               processorArchitecture="PROC_ARCH_PLACEHOLDER"
+               processorArchitecture="%%PROC_ARCH%%"
                publicKeyToken="31bf3856ad364e35"
                language="neutral" versionScope="nonSxS">
 
@@ -359,13 +312,13 @@ cat > "$SCRIPT_DIR/shared/autounattend.xml" << 'XMLEOF'
       <UserAccounts>
         <LocalAccounts>
           <LocalAccount wcm:action="add">
-            <Name>WIN_USER_PLACEHOLDER</Name>
+            <Name>%%WIN_USER%%</Name>
             <Group>Administrators</Group>
             <Password>
-              <Value>WIN_PASS_PLACEHOLDER</Value>
+              <Value>%%WIN_PASS%%</Value>
               <PlainText>true</PlainText>
             </Password>
-            <DisplayName>WIN_USER_PLACEHOLDER</DisplayName>
+            <DisplayName>%%WIN_USER%%</DisplayName>
             <Description>EA Architect Account</Description>
           </LocalAccount>
         </LocalAccounts>
@@ -373,9 +326,9 @@ cat > "$SCRIPT_DIR/shared/autounattend.xml" << 'XMLEOF'
 
       <AutoLogon>
         <Enabled>true</Enabled>
-        <Username>WIN_USER_PLACEHOLDER</Username>
+        <Username>%%WIN_USER%%</Username>
         <Password>
-          <Value>WIN_PASS_PLACEHOLDER</Value>
+          <Value>%%WIN_PASS%%</Value>
           <PlainText>true</PlainText>
         </Password>
         <LogonCount>3</LogonCount>
@@ -406,32 +359,43 @@ cat > "$SCRIPT_DIR/shared/autounattend.xml" << 'XMLEOF'
 </unattend>
 XMLEOF
 
-sed -i.bak "s/PROC_ARCH_PLACEHOLDER/$PROC_ARCH/g" "$SCRIPT_DIR/shared/autounattend.xml"
-sed -i.bak "s/WIN_USER_PLACEHOLDER/$WIN_USER/g" "$SCRIPT_DIR/shared/autounattend.xml"
-sed -i.bak "s/WIN_PASS_PLACEHOLDER/$WIN_PASS/g" "$SCRIPT_DIR/shared/autounattend.xml"
-sed -i.bak "s/WIN_HOSTNAME_PLACEHOLDER/$WIN_HOSTNAME/g" "$SCRIPT_DIR/shared/autounattend.xml"
-rm -f "$SCRIPT_DIR/shared/autounattend.xml.bak"
+# Replace placeholders using Python — handles any special characters in credentials
+# (sed breaks on passwords that contain /, &, or \, which are all valid password chars)
+SUBST_PROC_ARCH="$PROC_ARCH" \
+SUBST_WIN_USER="$WIN_USER" \
+SUBST_WIN_PASS="$WIN_PASS" \
+SUBST_WIN_HOSTNAME="$WIN_HOSTNAME" \
+SUBST_XML_FILE="$AUTOUNATTEND_XML" \
+python3 << 'PYEOF'
+import os
+xml_file = os.environ["SUBST_XML_FILE"]
+xml = open(xml_file, encoding="utf-8").read()
+for placeholder, env_key in [
+    ("%%PROC_ARCH%%",    "SUBST_PROC_ARCH"),
+    ("%%WIN_USER%%",     "SUBST_WIN_USER"),
+    ("%%WIN_PASS%%",     "SUBST_WIN_PASS"),
+    ("%%WIN_HOSTNAME%%", "SUBST_WIN_HOSTNAME"),
+]:
+    xml = xml.replace(placeholder, os.environ[env_key])
+open(xml_file, "w", encoding="utf-8").write(xml)
+PYEOF
 
 log "✅ autounattend.xml generated"
 
 #===============================================================================
-# STEP 6: Create the autounattend ISO
+# STEP 6: Generate PowerShell setup scripts
 #===============================================================================
-log "=== Step 6: Creating autounattend ISO ==="
+log "=== Step 6: Generating PowerShell setup scripts ==="
 
 AUTOUNATTEND_DIR="$SCRIPT_DIR/shared/autounattend-iso-content"
-mkdir -p "$AUTOUNATTEND_DIR/\$OEM\$/\$\$/Setup/Scripts"
-cp "$SCRIPT_DIR/shared/autounattend.xml" "$AUTOUNATTEND_DIR/autounattend.xml"
-mkdir -p "$AUTOUNATTEND_DIR/\$OEM\$/\$1/setup-scripts"
+mkdir -p \
+    "$AUTOUNATTEND_DIR/\$OEM\$/\$\$/Setup/Scripts" \
+    "$AUTOUNATTEND_DIR/\$OEM\$/\$1/setup-scripts"
 
-# ---------------------------------------------------------------------------
-# 01-install-vmtools.ps1
-# ---------------------------------------------------------------------------
+cp "$AUTOUNATTEND_XML" "$AUTOUNATTEND_DIR/autounattend.xml"
+
+# --- 01-install-vmtools.ps1 ---------------------------------------------------
 cat > "$AUTOUNATTEND_DIR/\$OEM\$/\$1/setup-scripts/01-install-vmtools.ps1" << 'PS1EOF'
-#===============================================================================
-# 01-install-vmtools.ps1
-# Installs VMware Tools from the mounted CD/DVD drive
-#===============================================================================
 $ErrorActionPreference = "Stop"
 $logFile = "C:\setup-scripts\vmtools-install.log"
 function Log($msg) { $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"; "$ts - $msg" | Tee-Object -FilePath $logFile -Append }
@@ -449,33 +413,24 @@ foreach ($drive in (Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Root 
 if ($vmToolsSetup) {
     Log "Found VMware Tools at: $vmToolsSetup"
     $proc = Start-Process -FilePath $vmToolsSetup -ArgumentList "/S /v/qn REBOOT=R" -Wait -PassThru
-    Log "VMware Tools exit code: $($proc.ExitCode)"
+    Log "Exit code: $($proc.ExitCode)"
 } else {
-    Log "VMware Tools not found. Use Virtual Machine menu > Install VMware Tools."
+    Log "VMware Tools not found — use Virtual Machine > Install VMware Tools."
 }
-Log "=== VMware Tools installation complete ==="
+Log "=== VMware Tools complete ==="
 PS1EOF
 
-# ---------------------------------------------------------------------------
-# 02-install-sparx-ea.ps1
-#
-# Detects which MSI was placed in the shared folder (licensed > trial > lite)
-# and installs silently.  Writes EA_EDITION=lite|full to
-# C:\setup-scripts\ea-edition.txt so that 03-configure-ea-mcp.ps1 can decide
-# whether to attempt the MCP3 COM bridge setup.
-# ---------------------------------------------------------------------------
+# --- 02-install-sparx-ea.ps1 --------------------------------------------------
+# Detects which MSI is present (licensed > trial > lite) and installs silently.
+# Writes EA_EDITION=licensed|trial|lite to ea-edition.txt for script 03.
 cat > "$AUTOUNATTEND_DIR/\$OEM\$/\$1/setup-scripts/02-install-sparx-ea.ps1" << 'PS1EOF'
-#===============================================================================
-# 02-install-sparx-ea.ps1
-# Silent install of Sparx Enterprise Architect (licensed / trial / lite)
-#===============================================================================
 $ErrorActionPreference = "SilentlyContinue"
 $logFile = "C:\setup-scripts\ea-install.log"
 function Log($msg) { $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"; "$ts - $msg" | Tee-Object -FilePath $logFile -Append }
 
 Log "=== Sparx EA Installation ==="
 
-# Wait for VMware shared folder to become available
+# Wait for VMware shared folder
 Log "Waiting for shared folder (Z:\)..."
 $waited = 0
 while (-not (Test-Path "Z:\installers") -and $waited -lt 120) {
@@ -483,27 +438,26 @@ while (-not (Test-Path "Z:\installers") -and $waited -lt 120) {
     net use Z: "\\vmware-host\Shared Folders\MacShare" 2>$null
 }
 
-# Priority order: licensed > trial > lite
-# EA Lite is a permanently free, read-only viewer — no COM automation API.
-# MCP3.exe (Sparx EA Bridge) requires a full edition (trial or licensed).
+# Priority: licensed > trial > lite
+# NOTE: Use distinct keys — PowerShell [ordered]@{} silently drops duplicate keys.
 $candidates = [ordered]@{
-    "full"    = @(
+    "licensed" = @(
         "Z:\installers\easetupfull.msi",
         "C:\setup-scripts\easetupfull.msi"
     )
-    "full"    = @(
+    "trial"    = @(
         "Z:\installers\easetup.msi",
         "C:\setup-scripts\easetup.msi",
         "C:\Users\Public\Downloads\easetup.msi"
     )
-    "lite"    = @(
+    "lite"     = @(
         "Z:\installers\ealite_x64.msi",
         "C:\setup-scripts\ealite_x64.msi",
         "C:\Users\Public\Downloads\ealite_x64.msi"
     )
 }
 
-$eaMsi    = $null
+$eaMsi     = $null
 $eaEdition = "unknown"
 
 foreach ($edition in $candidates.Keys) {
@@ -519,15 +473,10 @@ foreach ($edition in $candidates.Keys) {
 }
 
 if (-not $eaMsi) {
-    Log "No EA MSI found. Searched:"
-    foreach ($edition in $candidates.Keys) {
-        foreach ($path in $candidates[$edition]) { Log "  - $path" }
-    }
-    Log "Run 01-setup-vmware-fusion.sh on the Mac to download an MSI, then re-run this script."
+    Log "No EA MSI found — run 01-setup-vmware-fusion.sh on the Mac to download one."
     exit 0
 }
 
-# Silent install
 Log "Installing $eaEdition edition silently..."
 $proc = Start-Process msiexec.exe -ArgumentList (
     "/i `"$eaMsi`" /qn /norestart ACCEPT=YES " +
@@ -536,7 +485,6 @@ $proc = Start-Process msiexec.exe -ArgumentList (
 ) -Wait -PassThru
 Log "msiexec exit code: $($proc.ExitCode)"
 
-# Verify
 $eaExe = @(
     "C:\Program Files (x86)\Sparx Systems\EA\EA.exe",
     "C:\Program Files (x86)\Sparx Systems\EA Trial\EA.exe",
@@ -547,14 +495,14 @@ $eaExe = @(
 if ($eaExe) {
     Log "✅ EA installed at: $eaExe"
 } else {
-    Log "⚠️  EA.exe not found after install. Check C:\setup-scripts\ea-msi-install.log"
+    Log "⚠️  EA.exe not found. Check C:\setup-scripts\ea-msi-install.log"
 }
 
-# Write edition marker for 03-configure-ea-mcp.ps1
+# Write edition marker for script 03
 "EA_EDITION=$eaEdition" | Out-File "C:\setup-scripts\ea-edition.txt" -Encoding ASCII
-Log "Edition marker written: EA_EDITION=$eaEdition"
+Log "Edition marker: EA_EDITION=$eaEdition"
 
-# Deploy license key if provided
+# Deploy license key if provided via shared folder
 $keyFile = "Z:\licenses\key.dat"
 if (Test-Path $keyFile) {
     $eaAppData = "$env:APPDATA\Sparx Systems\EA"
@@ -566,27 +514,15 @@ if (Test-Path $keyFile) {
 Log "=== Sparx EA installation complete ==="
 PS1EOF
 
-# ---------------------------------------------------------------------------
-# 03-configure-ea-mcp.ps1
-#
-# Reads EA_EDITION from the marker file written by step 02.
-# For full editions: configures MCP3.exe COM bridge for Claude Desktop.
-# For lite edition:  skips MCP3 setup (no COM API), logs a clear explanation.
-# Both: enables RDP and creates a desktop shortcut.
-# ---------------------------------------------------------------------------
+# --- 03-configure-ea-mcp.ps1 --------------------------------------------------
 cat > "$AUTOUNATTEND_DIR/\$OEM\$/\$1/setup-scripts/03-configure-ea-mcp.ps1" << 'PS1EOF'
-#===============================================================================
-# 03-configure-ea-mcp.ps1
-# Configures the Sparx EA MCP server for Claude Desktop (full editions only)
-#===============================================================================
 $ErrorActionPreference = "SilentlyContinue"
 $logFile = "C:\setup-scripts\mcp-setup.log"
 function Log($msg) { $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"; "$ts - $msg" | Tee-Object -FilePath $logFile -Append }
 
 Log "=== MCP Server Configuration ==="
 
-# Read edition written by 02-install-sparx-ea.ps1
-$eaEdition = "full"   # default if marker missing
+$eaEdition = "trial"
 $markerFile = "C:\setup-scripts\ea-edition.txt"
 if (Test-Path $markerFile) {
     $line = Get-Content $markerFile -Raw
@@ -594,7 +530,6 @@ if (Test-Path $markerFile) {
 }
 Log "EA edition: $eaEdition"
 
-# Locate EA install directory (covers full and lite paths)
 $eaDir = @(
     "C:\Program Files (x86)\Sparx Systems\EA",
     "C:\Program Files (x86)\Sparx Systems\EA Trial",
@@ -608,73 +543,54 @@ if (-not $eaDir) {
 }
 Log "EA directory: $eaDir"
 
-# Enable RDP and file sharing regardless of edition
-Log "Enabling Remote Desktop..."
+# Enable RDP for all editions
 Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-    -Name "fDenyTSConnections" -Value 0 -ErrorAction SilentlyContinue
-Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-Enable-NetFirewallRule -DisplayGroup "File and Printer Sharing" -ErrorAction SilentlyContinue
+    -Name "fDenyTSConnections" -Value 0
+Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+Enable-NetFirewallRule -DisplayGroup "File and Printer Sharing"
 Log "✅ Remote Desktop enabled"
 
 if ($eaEdition -eq "lite") {
-    # EA Lite has no COM automation API — MCP3.exe will not work.
-    # The SQLite Analyzer MCP server on macOS reads .qea files directly
-    # and is fully functional regardless of this VM's EA edition.
     Log ""
-    Log "╔══════════════════════════════════════════════════════════════════╗"
-    Log "║  EA Lite (Viewer) detected — MCP3 COM bridge not available     ║"
-    Log "║                                                                ║"
-    Log "║  EA Lite is a read-only viewer with no COM automation API.     ║"
-    Log "║  The Sparx EA Bridge MCP server (MCP3.exe) requires a full     ║"
-    Log "║  edition (trial or licensed) to function.                      ║"
-    Log "║                                                                ║"
-    Log "║  What still works:                                             ║"
-    Log "║  ✅ EA Lite — browse and view any .qea model in Windows        ║"
-    Log "║  ✅ SQLite Analyzer MCP (macOS) — read-only Claude queries     ║"
-    Log "║                                                                ║"
-    Log "║  To enable full read+write MCP access, re-run setup with:     ║"
-    Log "║    EA_EDITION=trial  in your .env on the Mac host              ║"
-    Log "╚══════════════════════════════════════════════════════════════════╝"
-
-    # Create a desktop note explaining the limitation
-    $noteContent = @"
+    Log "╔══════════════════════════════════════════════════════════╗"
+    Log "║  EA Lite: MCP3 COM bridge is not available               ║"
+    Log "║                                                         ║"
+    Log "║  EA Lite is a read-only viewer with no COM automation.   ║"
+    Log "║  The SQLite Analyzer MCP on macOS still works fully.     ║"
+    Log "║  Set EA_EDITION=trial in .env to enable MCP write access.║"
+    Log "╚══════════════════════════════════════════════════════════╝"
+    @"
 EA Lite is installed (read-only viewer).
 
-The MCP3.exe COM bridge is NOT available with EA Lite.
-To enable full Claude MCP write access, reinstall with the trial or licensed edition.
+MCP3.exe COM bridge: NOT available (no COM automation API in EA Lite).
+SQLite Analyzer MCP on macOS: fully functional (no VM needed).
 
-The SQLite Analyzer MCP server on your Mac (no VM needed) is fully functional
-and supports all read-only Claude queries against any .qea model file.
-
-Download the EA trial: https://sparxsystems.com/products/ea/trial/request.html
-"@
-    $noteContent | Out-File "C:\Users\Public\Desktop\EA-Lite-MCP-Note.txt" -Encoding UTF8
+To enable full MCP write access, reinstall with EA_EDITION=trial.
+Download: https://sparxsystems.com/products/ea/trial/request.html
+"@ | Out-File "C:\Users\Public\Desktop\EA-Lite-MCP-Note.txt" -Encoding UTF8
     Log "✅ Limitation note written to desktop"
     exit 0
 }
 
-# ---- Full edition (trial or licensed) ----
-
+# Full or licensed edition — configure MCP3.exe
 $mcpDir = "$eaDir\MCP_Server"
 if (Test-Path "$mcpDir\MCP3.exe") {
-    Log "✅ MCP3.exe bundled with EA at: $mcpDir"
+    Log "✅ MCP3.exe found at: $mcpDir"
 } else {
     Log "MCP3.exe not bundled with this EA version."
-    Log "Download from: https://www.sparxsystems.jp/en/MCP/"
-    Log "Extract to: $eaDir\MCP_Server\"
+    Log "Download: https://www.sparxsystems.jp/en/MCP/"
+    Log "Install to: $eaDir\MCP_Server\"
 }
 
 # Build Claude Desktop config using ConvertTo-Json (avoids backslash escaping bugs)
 $claudeConfigDir = "$env:APPDATA\Claude"
-New-Item -ItemType Directory -Path $claudeConfigDir -Force -ErrorAction SilentlyContinue | Out-Null
+New-Item -ItemType Directory -Path $claudeConfigDir -Force | Out-Null
 
 $configObj = @{
     mcpServers = @{
         "Enterprise Architect" = @{
             command = "$mcpDir\MCP3.exe"
-            # -enableEdit grants write access to the model.
-            # Remove this argument for read-only MCP access.
-            args = @("-enableEdit")
+            args    = @("-enableEdit")   # remove -enableEdit for read-only access
         }
     }
 }
@@ -682,43 +598,37 @@ $configObj = @{
 $configFile = "$claudeConfigDir\claude_desktop_config.json"
 if (Test-Path $configFile) {
     Copy-Item $configFile "$configFile.bak" -Force
-    Log "Existing config backed up to: $configFile.bak"
+    Log "Existing config backed up: $configFile.bak"
 }
-
 $configObj | ConvertTo-Json -Depth 5 | Out-File -FilePath $configFile -Encoding UTF8
 Log "✅ Claude Desktop MCP config written: $configFile"
 
-# Desktop launcher
+# Desktop launcher shortcut
 @"
 @echo off
 echo Starting Enterprise Architect with MCP Server...
 start "" "$eaDir\EA.exe"
-echo EA launched. MCP Server connects automatically via Claude Desktop.
+echo EA launched. MCP connects automatically via Claude Desktop.
 pause
 "@ | Out-File "C:\Users\Public\Desktop\Launch-EA-MCP.bat" -Encoding ASCII
 Log "✅ Desktop launcher created"
 
 Log ""
-Log "╔══════════════════════════════════════════════════════════════════╗"
-Log "║  ✅ Setup complete ($eaEdition edition)                        ║"
-Log "║                                                                ║"
-Log "║  EA directory : $eaDir"
-Log "║  MCP config   : $configFile"
-Log "║  RDP          : enabled"
-Log "║                                                                ║"
-Log "║  To use with Claude:                                           ║"
-Log "║  1. Launch EA via the desktop shortcut and open a model        ║"
-Log "║  2. Open Claude Desktop on Windows                             ║"
-Log "║  3. The MCP server connects automatically                      ║"
-Log "║                                                                ║"
-Log "║  Models in Z:\models\ are accessible from both Mac and VM      ║"
-Log "╚══════════════════════════════════════════════════════════════════╝"
+Log "╔══════════════════════════════════════════════════════════╗"
+Log "║  ✅ Setup complete ($eaEdition edition)                     ║"
+Log "║  MCP config: $configFile"
+Log "║  RDP: enabled                                             ║"
+Log "╚══════════════════════════════════════════════════════════╝"
 Log "=== MCP configuration complete ==="
 PS1EOF
 
+log "✅ PowerShell setup scripts generated"
+
 #===============================================================================
-# Build autounattend ISO
+# STEP 7: Build autounattend ISO and patch VMX
 #===============================================================================
+log "=== Step 7: Building autounattend ISO ==="
+
 AUTOUNATTEND_ISO="$SCRIPT_DIR/iso/autounattend.iso"
 
 if command -v hdiutil &>/dev/null; then
@@ -728,47 +638,49 @@ if command -v hdiutil &>/dev/null; then
         if command -v mkisofs &>/dev/null; then
             mkisofs -o "$AUTOUNATTEND_ISO" -V "OEMDRV" -J -r "$AUTOUNATTEND_DIR"
         else
-            log "⚠️  Could not create ISO. Install cdrtools: brew install cdrtools"
+            log "⚠️  Cannot create ISO. Install cdrtools: brew install cdrtools"
         fi
     }
-
-    if [ -f "$AUTOUNATTEND_ISO" ]; then
-        log "✅ Autounattend ISO: $AUTOUNATTEND_ISO"
-        sed -i.bak "s|sata0:1.fileName = \"\"|sata0:1.fileName = \"$AUTOUNATTEND_ISO\"|" "$VMX_FILE"
-        rm -f "$VMX_FILE.bak"
-    else
-        log "❌ Autounattend ISO creation failed — Windows setup will run interactively."
-        exit 1
-    fi
 else
     log "⚠️  hdiutil not available. ISO creation skipped."
 fi
 
-# Patch the tiny11 ISO path if it was downloaded by script 01
+if [ -f "$AUTOUNATTEND_ISO" ]; then
+    log "✅ Autounattend ISO: $AUTOUNATTEND_ISO"
+    # Patch the VMX to point at the autounattend ISO
+    ESCAPED_ISO="${AUTOUNATTEND_ISO//&/\\&}"
+    sed -i.bak "s|sata0:1.fileName = \"\"|sata0:1.fileName = \"$ESCAPED_ISO\"|" "$VMX_FILE"
+    rm -f "$VMX_FILE.bak"
+else
+    log "❌ Autounattend ISO creation failed — Windows will install interactively."
+    exit 1
+fi
+
+# Patch VMX with the tiny11 ISO path if script 01 downloaded it
 TINY11_ISO=$(ls "$SCRIPT_DIR/iso/tiny11_"*.iso 2>/dev/null | head -1 || true)
 if [ -n "$TINY11_ISO" ]; then
-    sed -i.bak "s|sata0:0.fileName = \"\"|sata0:0.fileName = \"$TINY11_ISO\"|" "$VMX_FILE"
+    ESCAPED_TINY11="${TINY11_ISO//&/\\&}"
+    sed -i.bak "s|sata0:0.fileName = \"\"|sata0:0.fileName = \"$ESCAPED_TINY11\"|" "$VMX_FILE"
     rm -f "$VMX_FILE.bak"
     log "✅ VMX patched with ISO: $TINY11_ISO"
 else
-    log "⚠️  No tiny11 ISO found in ./iso/. Edit sata0:0.fileName in the VMX manually."
+    log "⚠️  No tiny11 ISO found in ./iso/ — edit sata0:0.fileName in the VMX manually."
 fi
 
 #===============================================================================
-# STEP 7: Print instructions
+# Done
 #===============================================================================
 log ""
-log "╔══════════════════════════════════════════════════════════════════╗"
-log "║  VM CREATED: $VM_NAME                                         ║"
-log "╠══════════════════════════════════════════════════════════════════╣"
-log "║  VMX    : $VMX_FILE"
-log "║  Disk   : ${VM_DISK_GB} GB | RAM: $((VM_RAM_MB/1024)) GB | CPUs: $VM_CPUS"
-log "║  User   : $WIN_USER / $WIN_PASS"
-log "╠══════════════════════════════════════════════════════════════════╣"
-log "║  1. Start the VM:                                              ║"
-log "║     vmrun start \"$VMX_FILE\"                                  ║"
-log "║  2. Windows installs unattended (~10–20 min)                   ║"
-log "║  3. Run: ./03-post-install.sh                                  ║"
-log "╚══════════════════════════════════════════════════════════════════╝"
+log "╔══════════════════════════════════════════════════════════╗"
+log "║  VM CREATED: $VM_NAME                                     ║"
+log "╠══════════════════════════════════════════════════════════╣"
+log "║  VMX  : $VMX_FILE"
+log "║  Disk : ${VM_DISK_GB} GB | RAM: $((VM_RAM_MB/1024)) GB | CPUs: $VM_CPUS"
+log "║  User : $WIN_USER / ****  (credentials from .env)"
+log "╠══════════════════════════════════════════════════════════╣"
+log "║  1. Start VM: vmrun start \"$VMX_FILE\"              ║"
+log "║  2. Windows installs unattended (~10-20 min)          ║"
+log "║  3. Run: ./03-post-install.sh                         ║"
+log "╚══════════════════════════════════════════════════════════╝"
 log ""
 log "=== VM creation complete ==="

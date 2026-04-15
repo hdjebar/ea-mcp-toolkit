@@ -46,13 +46,12 @@ import logging
 # Configuration
 # ---------------------------------------------------------------------------
 
-VM_HOST    = os.environ.get("EA_VM_HOST", "")
-VM_USER    = os.environ.get("EA_VM_USER", "architect")
-VM_PORT    = os.environ.get("EA_VM_PORT", "22")
-VM_KEY     = os.environ.get("EA_VM_KEY", "")
+VM_HOST     = os.environ.get("EA_VM_HOST", "")
+VM_USER     = os.environ.get("EA_VM_USER", "architect")
+VM_PORT     = os.environ.get("EA_VM_PORT", "22")
+VM_KEY      = os.environ.get("EA_VM_KEY", "")
 ENABLE_EDIT = os.environ.get("EA_MCP_EDIT", "1") == "1"
 
-# Known MCP3.exe install paths on Windows (tried in order)
 _MCP_PATH_ENV = os.environ.get("EA_MCP_PATH", "")
 MCP_CANDIDATE_PATHS = [
     p for p in [
@@ -63,8 +62,8 @@ MCP_CANDIDATE_PATHS = [
 ]
 
 # Reconnect settings
-MAX_RETRIES   = 3
-RETRY_DELAYS  = [2, 4, 8]   # seconds between attempts
+MAX_RETRIES  = 3
+RETRY_DELAYS = [2, 4, 8]   # seconds between attempts
 
 LOG_FILE = os.path.expanduser("~/bridge-ea-mcp.log")
 
@@ -85,7 +84,6 @@ def resolve_vm_host() -> str:
     if VM_HOST:
         return VM_HOST
 
-    # Try vm.sh helper from the vm-setup directory
     vm_sh = os.path.expanduser("~/setup-ea-vm/vm.sh")
     if os.path.isfile(vm_sh):
         try:
@@ -99,7 +97,6 @@ def resolve_vm_host() -> str:
         except Exception as exc:
             log.warning(f"vm.sh ip failed: {exc}")
 
-    # Try vmrun directly — note: getGuestIPAddress does NOT require guest credentials
     vmrun = "/Applications/VMware Fusion.app/Contents/Library/vmrun"
     vmx   = os.path.expanduser(
         "~/Virtual Machines.localized/Windows11-EA.vmwarevm/Windows11-EA.vmx"
@@ -122,9 +119,57 @@ def resolve_vm_host() -> str:
 
 
 def find_mcp_path() -> str:
-    """Return the configured MCP3.exe path (existence verified on the remote side)."""
+    """Return the configured MCP3.exe path (first candidate or the default)."""
     return MCP_CANDIDATE_PATHS[0] if MCP_CANDIDATE_PATHS else \
         r"C:\Program Files\Sparx Systems\EA\MCP_Server\MCP3.exe"
+
+
+def verify_mcp_exists(host: str, mcp_path: str) -> bool:
+    """Run a quick SSH command to check that MCP3.exe exists on the remote VM.
+
+    Returns True if the file is found (or if the check itself fails and we
+    cannot be sure — the caller should proceed and let the real SSH command
+    surface the error).  Returns False only when we can positively confirm
+    the file is absent.
+    """
+    ssh = shutil.which("ssh")
+    if not ssh:
+        return True  # can’t verify, assume OK
+
+    cmd = [
+        ssh, "-T",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ConnectTimeout=10",
+        "-o", "BatchMode=yes",
+        "-p", VM_PORT,
+    ]
+    if VM_KEY:
+        cmd.extend(["-i", VM_KEY])
+    cmd.append(f"{VM_USER}@{host}")
+    # Windows cmd.exe: echo FOUND if MCP3.exe exists, NOTFOUND otherwise
+    cmd.append(f'if exist "{mcp_path}" (echo FOUND) else (echo NOTFOUND)')
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if "NOTFOUND" in result.stdout:
+            log.error(
+                f"MCP3.exe not found at remote path: {mcp_path}\n"
+                f"  Download from: https://www.sparxsystems.jp/en/MCP/\n"
+                f"  Override path: set EA_MCP_PATH env var"
+            )
+            return False
+        if "FOUND" in result.stdout:
+            log.info(f"MCP3.exe confirmed at: {mcp_path}")
+            return True
+        # Ambiguous result (SSH not yet ready, wrong shell, etc.) — proceed
+        log.debug(f"MCP3.exe check inconclusive: stdout={result.stdout!r}")
+        return True
+    except subprocess.TimeoutExpired:
+        log.warning("MCP3.exe existence check timed out — proceeding anyway")
+        return True
+    except Exception as exc:
+        log.warning(f"MCP3.exe existence check failed: {exc} — proceeding anyway")
+        return True
 
 
 def build_ssh_command(host: str) -> list[str]:
@@ -135,15 +180,13 @@ def build_ssh_command(host: str) -> list[str]:
         sys.exit(1)
 
     mcp_path = find_mcp_path()
-    # shlex.quote() prevents shell metacharacters in EA_MCP_PATH from being
-    # interpreted by the remote shell.
     quoted_path = shlex.quote(mcp_path)
     mcp_args   = "-enableEdit" if ENABLE_EDIT else ""
     remote_cmd = f"{quoted_path} {mcp_args}".strip()
 
     cmd = [
         ssh,
-        "-T",                                  # No TTY (pure pipe)
+        "-T",
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", "ConnectTimeout=15",
         "-o", "ServerAliveInterval=30",
@@ -154,14 +197,23 @@ def build_ssh_command(host: str) -> list[str]:
         cmd.extend(["-i", VM_KEY])
     cmd.append(f"{VM_USER}@{host}")
     cmd.append(remote_cmd)
-
     return cmd
 
 
 def main() -> None:
     """Launch SSH tunnel and pipe STDIO bidirectionally, with automatic retry."""
     host = resolve_vm_host()
-    cmd  = build_ssh_command(host)
+
+    # Verify MCP3.exe exists on the VM before starting the real tunnel.
+    # This produces a clear error message instead of a cryptic SSH exit code.
+    mcp_path = find_mcp_path()
+    if not verify_mcp_exists(host, mcp_path):
+        log.warning(
+            "MCP3.exe not found — bridge will attempt to start anyway. "
+            "Set EA_MCP_PATH if the binary is in a non-standard location."
+        )
+
+    cmd = build_ssh_command(host)
 
     for attempt in range(MAX_RETRIES):
         log.info(
@@ -207,7 +259,6 @@ def main() -> None:
             delay = RETRY_DELAYS[attempt]
             log.info(f"Retrying in {delay}s (attempt {attempt + 2}/{MAX_RETRIES})...")
             time.sleep(delay)
-            # Re-resolve host — VM IP may have changed after a NAT re-address
             host = resolve_vm_host()
             cmd  = build_ssh_command(host)
 
